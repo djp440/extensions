@@ -148,45 +148,58 @@ async function registerProviderFromConfig(
     console.log(`[${name}] 信息接口数据无效，尝试标准接口`);
   }
 
-  // 标准 OpenAI /v1/models
+  // 标准接口：尝试多个路径，取返回模型最多的那个
   const base = base_url.replace(/\/$/, "");
+  const pathsToTry = ["/v1/models", "/models", "/api/models", "/api/v1/models"];
 
-  // 尝试多个常见路径
-  const pathsToTry = ["/models", "/v1/models", "/api/models", "/api/v1/models"];
+  let bestResult: { models: any[]; url: string } | null = null;
+
   for (const path of pathsToTry) {
     const url = `${base}${path}`;
     const body = await fetchJSON(url, headers, name);
-    if (body?.data && body.data.length > 0) {
-      const models = body.data.map((m: any) => {
+    if (!body) continue;
+
+    // OpenAI 格式：{ data: [{ id, ... }, ...] }
+    const rawList: any[] = body.data || body.models || [];
+    if (rawList.length === 0) continue;
+
+    const models = rawList
+      .map((m: any) => {
         const id = m.id || m.model_id || m.name;
         if (!id) return null;
-        const heuristics = inferModelMeta(id);
+        // 跳过非 LLM（比如审核模型、embedding）
+        if (m.type && m.type !== "llm" && m.type !== "chat") return null;
+        if (m.object && m.object !== "model") return null;
+        const h = inferModelMeta(id);
         return {
           id,
           name: m.name || m.model_name || id,
-          reasoning: heuristics.reasoning,
-          input: heuristics.input,
-          contextWindow: heuristics.contextWindow,
-          maxTokens: heuristics.maxTokens,
+          reasoning: h.reasoning,
+          input: h.input,
+          contextWindow: h.contextWindow,
+          maxTokens: h.maxTokens,
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         };
-      }).filter(Boolean);
+      })
+      .filter((m: any): m is NonNullable<typeof m> => m !== null);
 
-      if (models.length > 0) {
-        pi.registerProvider(name, {
-          name: `${name}`,
-          baseUrl: base_url,
-          apiKey: api_key || undefined,
-          api: "openai-completions",
-          models,
-        });
-        console.log(`[${name}] 注册 ${models.length} 个模型（${url}）`);
-        return;
-      }
+    if (models.length > 0 && (!bestResult || models.length > bestResult.models.length)) {
+      bestResult = { models, url };
     }
   }
 
-  console.log(`[${name}] 所有接口均无法获取模型列表，跳过`);
+  if (bestResult && bestResult.models.length > 0) {
+    pi.registerProvider(name, {
+      name: `${name}`,
+      baseUrl: base_url,
+      apiKey: api_key || undefined,
+      api: "openai-completions",
+      models: bestResult.models,
+    });
+    console.log(`[${name}] 注册 ${bestResult.models.length} 个模型（${bestResult.url}）`);
+  } else {
+    console.log(`[${name}] 所有接口均无法获取模型列表，跳过`);
+  }
 }
 
 // ── 模型名称启发式推断 ───────────────────────────────
