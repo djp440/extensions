@@ -54,6 +54,35 @@ function writeConfig(config: AppConfig) {
   writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 4), "utf-8");
 }
 
+// ── 安全 JSON 请求 ───────────────────────────────────
+/** 发起 fetch，只接受 JSON 响应，非 JSON 返回 null 并打印诊断信息 */
+async function fetchJSON(
+  url: string,
+  headers: Record<string, string>,
+  label: string,
+): Promise<any | null> {
+  const resp = await fetch(url, { headers });
+
+  const contentType = resp.headers.get("content-type") || "";
+
+  if (!contentType.startsWith("application/json") && !contentType.startsWith("text/json")) {
+    // 不是 JSON -> 读一小段看看是什么
+    const text = await resp.text();
+    const snippet = text.slice(0, 200).replace(/\n/g, " ");
+    console.log(`[${label}] ${resp.status} ${resp.statusText}, content-type=${contentType}, body=${snippet}`);
+    return null;
+  }
+
+  if (!resp.ok) {
+    const text = await resp.text();
+    const snippet = text.slice(0, 200).replace(/\n/g, " ");
+    console.log(`[${label}] HTTP ${resp.status}: ${snippet}`);
+    return null;
+  }
+
+  return resp.json();
+}
+
 // ── 注册单个供应商 ───────────────────────────────────
 async function registerProviderFromConfig(
   pi: ExtensionAPI,
@@ -62,7 +91,9 @@ async function registerProviderFromConfig(
   const { name, base_url, api_key, info_endpoint } = provider;
   const resolvedKey = resolveApiKey(api_key || "");
 
-  const headers: Record<string, string> = {};
+  const headers: Record<string, string> = {
+    "Accept": "application/json",
+  };
   if (resolvedKey) {
     headers["Authorization"] = `Bearer ${resolvedKey}`;
   }
@@ -71,117 +102,91 @@ async function registerProviderFromConfig(
   if (info_endpoint) {
     const origin = new URL(base_url).origin;
     const infoUrl = `${origin}${info_endpoint}`;
-    try {
-      const resp = await fetch(infoUrl, { headers });
-      if (resp.ok) {
-        const body = (await resp.json()) as {
-          data?: Array<{
-            model_id: string;
-            model_name?: string;
-            types?: string;
-            features?: string;
-            input_modalities?: string;
-            context_length?: number;
-            max_output?: number;
-            pricing?: {
-              input?: number;
-              output?: number;
-              cache_read?: number;
-              cache_write?: number;
-            };
-          }>;
-        };
+    const body = await fetchJSON(infoUrl, headers, name);
 
-        if (body.data && body.data.length > 0) {
-          const llmModels = body.data.filter((m) => !m.types || m.types === "llm");
+    if (body?.data && body.data.length > 0) {
+      const llmModels = body.data.filter((m: any) => !m.types || m.types === "llm");
 
-          const models = llmModels.map((m) => {
-            const features = m.features ? m.features.split(",").map((s) => s.trim()) : [];
-            const modalities = m.input_modalities
-              ? m.input_modalities.split(",").map((s) => s.trim())
-              : [];
+      const models = llmModels.map((m: any) => {
+        const features = m.features ? m.features.split(",").map((s: string) => s.trim()) : [];
+        const modalities = m.input_modalities
+          ? m.input_modalities.split(",").map((s: string) => s.trim())
+          : [];
 
-            const input: ("text" | "image")[] = ["text"];
-            if (modalities.includes("image") || modalities.includes("video")) {
-              input.push("image");
-            }
-
-            return {
-              id: m.model_id,
-              name: m.model_name || m.model_id,
-              reasoning: features.includes("thinking"),
-              input,
-              contextWindow: m.context_length || 128000,
-              maxTokens: m.max_output || 8192,
-              cost: {
-                input: m.pricing?.input ?? 0,
-                output: m.pricing?.output ?? 0,
-                cacheRead: m.pricing?.cache_read ?? 0,
-                cacheWrite: m.pricing?.cache_write ?? 0,
-              },
-            };
-          });
-
-          pi.registerProvider(name, {
-            name: `${name}`,
-            baseUrl: base_url,
-            apiKey: api_key || undefined,
-            api: "openai-completions",
-            models,
-          });
-
-          console.log(`[${name}] 注册 ${models.length} 个模型（信息接口）`);
-          return;
+        const input: ("text" | "image")[] = ["text"];
+        if (modalities.includes("image") || modalities.includes("video")) {
+          input.push("image");
         }
-      }
-      console.log(`[${name}] 信息接口不可用 (${resp.status})，回退到标准接口`);
-    } catch (e) {
-      console.log(`[${name}] 信息接口请求失败，回退到标准接口:`, e);
+
+        return {
+          id: m.model_id,
+          name: m.model_name || m.model_id,
+          reasoning: features.includes("thinking"),
+          input,
+          contextWindow: m.context_length || 128000,
+          maxTokens: m.max_output || 8192,
+          cost: {
+            input: m.pricing?.input ?? 0,
+            output: m.pricing?.output ?? 0,
+            cacheRead: m.pricing?.cache_read ?? 0,
+            cacheWrite: m.pricing?.cache_write ?? 0,
+          },
+        };
+      });
+
+      pi.registerProvider(name, {
+        name: `${name}`,
+        baseUrl: base_url,
+        apiKey: api_key || undefined,
+        api: "openai-completions",
+        models,
+      });
+
+      console.log(`[${name}] 注册 ${models.length} 个模型（信息接口）`);
+      return;
     }
+    console.log(`[${name}] 信息接口数据无效，尝试标准接口`);
   }
 
   // 标准 OpenAI /v1/models
-  try {
-    const resp = await fetch(`${base_url.replace(/\/$/, "")}/models`, { headers });
-    if (!resp.ok) {
-      console.log(`[${name}] 获取模型列表失败 (${resp.status})`);
-      return;
+  const base = base_url.replace(/\/$/, "");
+
+  // 尝试多个常见路径
+  const pathsToTry = ["/models", "/v1/models", "/api/models", "/api/v1/models"];
+  for (const path of pathsToTry) {
+    const url = `${base}${path}`;
+    const body = await fetchJSON(url, headers, name);
+    if (body?.data && body.data.length > 0) {
+      const models = body.data.map((m: any) => {
+        const id = m.id || m.model_id || m.name;
+        if (!id) return null;
+        const heuristics = inferModelMeta(id);
+        return {
+          id,
+          name: m.name || m.model_name || id,
+          reasoning: heuristics.reasoning,
+          input: heuristics.input,
+          contextWindow: heuristics.contextWindow,
+          maxTokens: heuristics.maxTokens,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        };
+      }).filter(Boolean);
+
+      if (models.length > 0) {
+        pi.registerProvider(name, {
+          name: `${name}`,
+          baseUrl: base_url,
+          apiKey: api_key || undefined,
+          api: "openai-completions",
+          models,
+        });
+        console.log(`[${name}] 注册 ${models.length} 个模型（${url}）`);
+        return;
+      }
     }
-
-    const body = (await resp.json()) as {
-      data?: Array<{ id: string }>;
-    };
-
-    if (!body.data || body.data.length === 0) {
-      console.log(`[${name}] 模型列表为空`);
-      return;
-    }
-
-    const models = body.data.map((m) => {
-      const heuristics = inferModelMeta(m.id);
-      return {
-        id: m.id,
-        name: m.id,
-        reasoning: heuristics.reasoning,
-        input: heuristics.input,
-        contextWindow: heuristics.contextWindow,
-        maxTokens: heuristics.maxTokens,
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      };
-    });
-
-    pi.registerProvider(name, {
-      name: `${name}`,
-      baseUrl: base_url,
-      apiKey: api_key || undefined,
-      api: "openai-completions",
-      models,
-    });
-
-    console.log(`[${name}] 注册 ${models.length} 个模型（标准接口）`);
-  } catch (e) {
-    console.log(`[${name}] 请求失败:`, e);
   }
+
+  console.log(`[${name}] 所有接口均无法获取模型列表，跳过`);
 }
 
 // ── 模型名称启发式推断 ───────────────────────────────
