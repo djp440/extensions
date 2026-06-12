@@ -14,7 +14,7 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Key } from "@earendil-works/pi-tui";
+import { Key, truncateToWidth } from "@earendil-works/pi-tui";
 
 const WIDGET_NAME = "plan-dock";
 
@@ -62,31 +62,34 @@ function renderWidget(
 		WIDGET_NAME,
 		(_tui, theme) => {
 			const done = steps.filter((s) => s.status === "completed").length;
-			const lines: string[] = [];
-
-			// 标题栏
-			lines.push(theme.fg("accent", `📋 Plan (${done}/${steps.length})`));
-
-			// 各步骤
-			for (const s of steps) {
-				const icon =
-					s.status === "completed"
-						? theme.fg("success", "✓")
-						: s.status === "in_progress"
-							? theme.fg("accent", "◐")
-							: theme.fg("dim", "○");
-				const id = theme.fg("dim", `#${s.id}`);
-				const text =
-					s.status === "completed"
-						? theme.fg("success", theme.strikethrough(s.text))
-						: s.status === "in_progress"
-							? theme.fg("accent", s.text)
-							: s.text;
-				lines.push(`  ${icon} ${id} ${text}`);
-			}
 
 			return {
-				render: () => lines,
+				render: (width: number) => {
+					const lines: string[] = [];
+
+					// 标题栏
+					lines.push(truncateToWidth(theme.fg("accent", `📋 Plan (${done}/${steps.length})`), width));
+
+					// 各步骤
+					for (const s of steps) {
+						const icon =
+							s.status === "completed"
+								? theme.fg("success", "✓")
+								: s.status === "in_progress"
+									? theme.fg("accent", "◐")
+									: theme.fg("dim", "○");
+						const id = theme.fg("dim", `#${s.id}`);
+						const text =
+							s.status === "completed"
+								? theme.fg("success", theme.strikethrough(s.text))
+								: s.status === "in_progress"
+									? theme.fg("accent", s.text)
+									: s.text;
+						lines.push(truncateToWidth(`  ${icon} ${id} ${text}`, width));
+					}
+
+					return lines;
+				},
 				invalidate: () => {},
 			};
 		},
