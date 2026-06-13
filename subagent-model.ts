@@ -97,10 +97,14 @@ function getModelList(ctx: ExtensionContext): { id: string; label: string }[] {
 	const models = ctx.modelRegistry.getAll();
 	return models
 		.filter((m) => ctx.modelRegistry.hasConfiguredAuth(m))
-		.map((m) => ({
-			id: m.id,
-			label: m.name || m.id,
-		}))
+		.map((m) => {
+			// 确保使用完整的 provider/model 格式
+			const fullId = m.provider ? `${m.provider}/${m.id}` : m.id;
+			return {
+				id: fullId,
+				label: m.name || fullId,
+			};
+		})
 		.sort((a, b) => a.id.localeCompare(b.id));
 }
 
